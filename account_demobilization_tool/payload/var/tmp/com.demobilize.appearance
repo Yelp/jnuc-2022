@@ -1,0 +1,63 @@
+#!/bin/zsh
+# shellcheck shell=bash
+# shellcheck disable=SC2034
+
+# Main heading that will be displayed under the image
+BANNER_TITLE="Account Demobilization Tool"
+
+# Banner image
+BANNER_IMAGE_PATH="/PATH/TO/LOGO.PNG"
+
+# Support Details, used in error and help bubble
+SUPPORT_CONTACT_DETAILS="YOUR DETAILS HERE"
+
+# Help Button Configuration
+HELP_BUBBLE_TITLE='Need Help?'
+HELP_BUBBLE_BODY='If you are experiencing issues completing migration steps, '
+HELP_BUBBLE_BODY+="$SUPPORT_CONTACT_DETAILS"
+
+# Initial Start Status text that shows as things are firing up
+# shellcheck disable=SC2034
+INITIAL_START_STATUS='Confirming pre-requisites...'
+ALTERNATE_START_STATUS='Resuming account conversion process...'
+
+# Paragraph text that will display under the main heading.
+INITIAL_START_MAIN_TEXT='This process should take approximately 3-5 minutes. \\n \\n'
+INITIAL_START_MAIN_TEXT+='You will be disconnected from the VPN during this process. \\n \\n'
+INITIAL_START_MAIN_TEXT+='If you require assistance, please click ? below'
+
+ALTERNATE_START_MAIN_TEXT='Almost ready! Executing final steps. \\n \\n'
+ALTERNATE_START_MAIN_TEXT+='This process should not take long. \\n \\n \\n \\n'
+ALTERNATE_START_MAIN_TEXT+='Remember, if you require assistance, please click ? below'
+
+# Text that will display in the progress bar
+DEMOBILIZATION_COMPLETE_TEXT='Account Conversion Complete'
+DEMOBILIZATION_COMPLETE_MAIN_TEXT='Thank you for your time!\\n'
+DEMOBILIZATION_COMPLETE_MAIN_TEXT+='\\n'
+DEMOBILIZATION_COMPLETE_BUTTON_TEXT='Done'
+
+# Text display before forced logout to initiate user migration via JamfConnect
+LOGOUT_TEXT='You must log out and back in to finalize your account conversion. \\n \\n'
+LOGOUT_TEXT+=' \\n \\n'
+LOGOUT_TEXT+='Please log back in with your current credentials.'
+LOGOUT_TEXT+=' \\n \\n \\n'
+LOGOUT_BUTTON_TEXT='Logout'
+
+#########################################################################################
+# Error Screen Text
+#########################################################################################
+# Main heading that will be displayed under the image
+# shellcheck disable=SC2034
+ERROR_BANNER_TITLE="Demobilization Error"
+
+ERROR_MAIN_TEXT='An error has occurred during account conversion. \\n'
+ERROR_SUFFIX_TEXT=' \\n \\n \\n '
+ERROR_SUFFIX_TEXT+='If you require assistance, please click ? below'
+
+# Error status message that is displayed under the progress bar
+# shellcheck disable=SC2034
+ERROR_STATUS='Account Conversion Failed'
+
+# Status Text Alignment
+# Valid values: left, right, or center
+STATUS_TEXT_ALIGN='center'

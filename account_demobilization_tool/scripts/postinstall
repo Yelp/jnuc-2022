@@ -1,0 +1,10 @@
+#!/bin/bash
+chmod +x /var/tmp/com.demobilize
+chmod +x /var/tmp/com.demobilize.appearance
+
+service_name="com.demobilize"
+if sudo launchctl print system/$service_name > /dev/null 2>&1; then
+    sudo launchctl bootout system/$service_name
+fi
+launchctl bootstrap system /Library/LaunchDaemons/com.demobilize.plist
+touch /var/tmp/.com.run_demobilize

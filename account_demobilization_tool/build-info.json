@@ -1,0 +1,10 @@
+{
+	"distribution_style": false,
+	"identifier": "com.demobilize",
+	"install_location": "/",
+	"name": "demobilize-${version}.pkg",
+	"ownership": "recommended",
+	"postinstall_action": "none",
+	"suppress_bundle_reolcation": true,
+	"version":  "1.0"
+}

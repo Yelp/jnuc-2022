@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>UserName</key>
+	<string>root</string>
+	<key>GroupName</key>
+	<string>wheel</string>
+	<key>InitGroups</key>
+	<false/>
+	<key>Label</key>
+	<string>com.demobilize</string>
+	<key>Program</key>
+	<string>/var/tmp/com.demobilize</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>WatchPaths</key>
+	<array>
+		<string>/var/tmp/.localhost.run_demobilize</string>
+	</array>
+	<key>StandardErrorPath</key>
+	<string>/var/log/com.demobilization.log</string>
+	<key>StandardOutPath</key>
+	<string>/var/log/com.demobilization.log</string>
+</dict>
+</plist>

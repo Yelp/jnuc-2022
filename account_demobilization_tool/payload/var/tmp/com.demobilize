@@ -1,0 +1,493 @@
+#!/bin/zsh
+# vim: set ft=sh:
+# shellcheck shell=bash
+# Version 1.0.29
+
+SYSTEM_DAEMONS_PATH='/Library/LaunchDaemons'
+DEMOBILIZATION_SCRIPT_FULL_PATH="$(test -L "$0" && readlink "$0" || echo "$0")"
+DEMOBILIZATION_DIR="$(cd "$(dirname "$DEMOBILIZATION_SCRIPT_FULL_PATH")" && pwd)"
+DEMOBILIZATION_SCRIPT="$(basename "$DEMOBILIZATION_SCRIPT_FULL_PATH")"
+DEMOBILIZATION_START_FLAG="/var/db/.localhost.account.demobilize.start"
+DEMOBILIZATION_RUN_FLAG="/var/tmp/.localhost.run_demobilize"
+PROGRESS_DB_PATH="/var/db/.localhost.demobilization.status"
+DEMOBILIZATION_COUNTER="demobilize_run_count"
+DEMOBILIZATION_STATUS_UPDATE_RECORD="last_status_update"
+DEMOBILIZATION_STATUS_UPDATE_MSG="last_status_update_msg"
+DEMOBILIZATION_DAEMON="${SYSTEM_DAEMONS_PATH}/com.demobilize.plist"
+DEMOBILIZATION_LAUNCH_AGENT="/Library/LaunchAgents/com.demobilize.trigger.plist"
+
+#########################################################################################
+# General Appearance
+#########################################################################################
+DEMOBILIZATION_APPEARANCE="${DEMOBILIZATION_DIR}/${DEMOBILIZATION_SCRIPT}.appearance"
+# shellcheck source=com.demobilize.appearance
+source "$DEMOBILIZATION_APPEARANCE"
+
+#########################################################################################
+# Various variables
+#########################################################################################
+# JamfConnect ID
+JAMFCONNECT_PKG_ID="com.jamf.connect.login"
+
+# Variables for File Paths
+JAMF_BINARY="/usr/local/bin/jamf"
+DEPNOTIFY_APP="/Applications/Utilities/DEPNotify.app"
+DEPNOTIFY_LOG="/var/tmp/depnotify.log"
+PKGUTIL_BINARY="/usr/sbin/pkgutil"
+DEFAULTS_BINARY="/usr/bin/defaults"
+AUTHCHANGER_BINARY="/usr/local/bin/authchanger"
+
+# Logging variables
+SCRIPTLOGGINGLEVEL="DEBUG"
+declare -A logPriorities=([DEBUG]=0 [INFO]=1 [WARN]=2 [ERROR]=3 [SEVERE]=4 [CRITICAL]=5)
+log() {
+  # Logger for stdout
+  dateTime=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  if [[ -z "${1}" || -z "${2}" ]]; then
+    echo "${dateTime} - ERROR : LOGGING REQUIRES A MESSAGE AND A PRIORITY, IN THAT ORDER."
+    echo "${dateTime} - ERROR : INPUTS WERE: ${1} and ${2}."
+  fi
+
+  logMessage="${1}"
+  logMessagePriority="${2}"
+
+  [[ ${logPriorities[$logMessagePriority]} ]] || return 1
+  ((${logPriorities[$logMessagePriority]} < ${logPriorities[$SCRIPTLOGGINGLEVEL]})) && return 2
+
+  echo -e "${dateTime} : ${logMessagePriority} : ${logMessage}" 1>&2
+}
+
+set_depnotify_preferences() {
+  # General plist configuration
+  DEPNOTIFY_CONFIG_PLIST="/Users/$CURRENT_USER/Library/Preferences/menu.nomad.DEPNotify.plist"
+  DEP_NOFIY_DOMAIN="menu.nomad.DEPNotify"
+
+  # Set status text alignment
+  sudo -u "$CURRENT_USER" $DEFAULTS_BINARY write $DEP_NOFIY_DOMAIN statusTextAlignment "$STATUS_TEXT_ALIGN"
+
+  # Set help button content
+  sudo -u "$CURRENT_USER" $DEFAULTS_BINARY delete $DEP_NOFIY_DOMAIN helpBubble >/dev/null 2>&1
+  sudo -u "$CURRENT_USER" $DEFAULTS_BINARY write $DEP_NOFIY_DOMAIN helpBubble -array-add "$HELP_BUBBLE_TITLE"
+  sudo -u "$CURRENT_USER" $DEFAULTS_BINARY write $DEP_NOFIY_DOMAIN helpBubble -array-add "$HELP_BUBBLE_BODY"
+
+  log "DEPNotify user settings: $(sudo -u "$CURRENT_USER" $DEFAULTS_BINARY read "$DEPNOTIFY_CONFIG_PLIST")" "INFO"
+}
+
+wait_for_desktop() {
+  # Run DEP Notify will run after Apple Setup Assistant
+  SETUP_ASSISTANT_PROCESS=$(pgrep -l "Setup Assistant")
+  until [[ "$SETUP_ASSISTANT_PROCESS" == "" ]]; do
+    log "Setup Assistant Still Running. PID $SETUP_ASSISTANT_PROCESS." "INFO"
+    sleep 1
+    SETUP_ASSISTANT_PROCESS=$(pgrep -l "Setup Assistant")
+  done
+
+  # Check to see if the Finder is running before continuing. This can help
+  # in scenarios where an end user is not configuring the device.
+  FINDER_PROCESS=$(pgrep -l "Finder")
+  until [[ "$FINDER_PROCESS" != "" ]]; do
+    log "Finder process not found. Assuming device is at login screen." "INFO"
+    sleep 1
+    FINDER_PROCESS=$(pgrep -l "Finder")
+  done
+}
+
+stop_conflicting_processes() {
+  # Stop DEPNotify if there was already a DEPNotify window running
+  PREVIOUS_DEPNOTIFY_PROCESS=$(pgrep -l "DEPNotify" | cut -d " " -f1)
+  until [[ -z "$PREVIOUS_DEPNOTIFY_PROCESS" ]]; do
+    log "Killing the previously-opened instance of DEPNotify: $PREVIOUS_DEPNOTIFY_PROCESS" "INFO"
+    kill "$PREVIOUS_DEPNOTIFY_PROCESS"
+    PREVIOUS_DEPNOTIFY_PROCESS=$(pgrep -l "DEPNotify" | cut -d " " -f1)
+  done
+}
+
+reset_depnotify() {
+  # Remove old DEPNotify log
+  rm -f $DEPNOTIFY_LOG >/dev/null 2>&1
+  # Remvoe old BOM files
+  rm -rf /var/tmp/com.depnotify* >/dev/null 2>&1
+  touch "$DEPNOTIFY_LOG"
+}
+
+set_depnotify_start_window() {
+  {
+    echo "Command: Image: $BANNER_IMAGE_PATH"
+    echo "Command: MainTitle: $BANNER_TITLE"
+    echo "Command: MainText: $_start_main_text"
+  } >>"$DEPNOTIFY_LOG"
+  sync
+}
+
+get_current_user_info() {
+  # After the Apple Setup completed. Now safe to grab the current user and user ID
+  CURRENT_USER=$(/usr/bin/stat -f "%Su" /dev/console)
+  CURRENT_USER_ID=$(id -u "$CURRENT_USER")
+  log "Current user set to $CURRENT_USER (id: $CURRENT_USER_ID)." "INFO"
+}
+
+wait_for_depnotify_process() {
+  # Grab the DEP Notify Process ID for later use
+  DEPNOTIFY_PROCESS=$(pgrep -l "DEPNotify" | cut -d " " -f1)
+  until [[ "$DEPNOTIFY_PROCESS" != "" ]]; do
+    log "Waiting for DEPNotify to start to gather the process ID." "DEBUG"
+    sleep 1
+    DEPNOTIFY_PROCESS=$(pgrep -l "DEPNotify" | cut -d " " -f1)
+  done
+}
+
+caffeinate_depnotify_process() {
+  log "Caffeinating DEP Notify process. Process ID: $DEPNOTIFY_PROCESS" "DEBUG"
+  caffeinate -disu -w "$DEPNOTIFY_PROCESS" &
+}
+
+start_depnotify_process() {
+  log "Launching $DEPNOTIFY_APP as $CURRENT_USER_ID" "INFO"
+  if [[ "$_run_count" == '1' ]]; then
+    sudo -u "$CURRENT_USER" open -a "$DEPNOTIFY_APP" --args -path "$DEPNOTIFY_LOG"
+    echo "Command: WindowStyle: Activate" >>"$DEPNOTIFY_LOG"
+    echo "Command: WindowStyle: ActivateOnStep" >>"$DEPNOTIFY_LOG"
+  fi
+}
+
+set_last_update_time() {
+  set_progress_record "$DEMOBILIZATION_STATUS_UPDATE_RECORD" "$(date +%s)"
+  set_progress_record "$DEMOBILIZATION_STATUS_UPDATE_MSG" "$1"
+}
+
+increment_progress() {
+  echo "Command: DeterminateManualStep: 1" >>"$DEPNOTIFY_LOG"
+}
+
+update_depnotify_status() {
+  local status_msg="$1"
+  local is_incrementing_progress="${2:-false}"
+
+  $is_incrementing_progress && increment_progress
+
+  set_last_update_time "$status_msg"
+  log "Updating DEPNotify status to: $status_msg" "DEBUG"
+  echo "Status: $status_msg" >>"$DEPNOTIFY_LOG"
+  sleep 5
+}
+
+get_depnotify_pid() {
+  pgrep -l "DEPNotify" | cut -d " " -f1
+}
+
+get_seconds_waiting() {
+  local now
+  local time_of_last_update
+  now=$(date +%s)
+  time_of_last_update=$(get_progress_record "$DEMOBILIZATION_STATUS_UPDATE_RECORD")
+  echo "$((now - time_of_last_update))"
+}
+
+check_if_in_error_state() {
+  local seconds_waiting
+  seconds_waiting="$(get_seconds_waiting)"
+  log "Last status update happeened: $seconds_waiting seconds ago..." "DEBUG"
+  if [[ "$seconds_waiting" -gt 300 ]]; then
+    show_depnotify_error
+  fi
+}
+
+wait_for_pkg() {
+  local pkg_id="$1"
+  local status_msg="$2"
+
+  update_depnotify_status "$status_msg" true
+
+  until $PKGUTIL_BINARY --pkg-info-plist "$pkg_id" >/dev/null 2>&1; do
+    check_if_in_error_state
+    log "Waiting for $pkg_id, message: '$status_msg'" "DEBUG"
+    sleep 3
+  done
+}
+
+submit_system_inventory() {
+  $JAMF_BINARY recon >/dev/null 2>&1
+  sleep 15
+}
+
+wait_for_profile() {
+  wait_count=0
+  local profile_name="$1"
+  local msg="$2"
+  log "Currently: $msg" "DEBUG"
+  update_depnotify_status "$msg" true
+  until profiles list -output stdout-xml -verbose | grep -q "$profile_name"; do
+    log "Still: $msg" "DEBUG"
+    sleep 15
+    ((wait_count++))
+    if [[ $wait_count -gt 8 ]]; then
+      submit_system_inventory
+      wait_count=0
+    fi
+    check_if_in_error_state
+  done
+}
+
+prompt_for_logout() {
+  local status_msg="$1"
+  log_demobilization_state
+  update_depnotify_status "$status_msg"
+  log "Prompting user to logout" "INFO"
+  {
+    echo "Command: DeterminateManual: 0"
+    echo "Command: MainText: $LOGOUT_TEXT"
+    echo "Command: ContinueButtonLogout: $LOGOUT_BUTTON_TEXT"
+  } >>"$DEPNOTIFY_LOG"
+}
+
+wait_for_defaults_sync() {
+  $DEFAULTS_BINARY read $PROGRESS_DB_PATH >/dev/null 2>&1
+  sleep 2
+}
+
+set_progress_record() {
+  local record_name="$1"
+  local record_value="$2"
+  log "Setting progress db record '$record_name' to '$record_value'" "DEBUG"
+  $DEFAULTS_BINARY write $PROGRESS_DB_PATH "$record_name" "$record_value" 2>/dev/null
+  # invalidate cache
+  $DEFAULTS_BINARY read $PROGRESS_DB_PATH >/dev/null 2>&1
+  sync
+}
+
+get_progress_record() {
+  local record_name="$1"
+  log "Collecting progress db record '$record_name'" "DEBUG"
+  wait_for_defaults_sync
+  if [[ "$record_name" == "ALL" ]]; then
+    $DEFAULTS_BINARY read $PROGRESS_DB_PATH 2>/dev/null
+  else
+    $DEFAULTS_BINARY read $PROGRESS_DB_PATH "$record_name" 2>/dev/null
+  fi
+}
+
+is_progress_db_empty() {
+  [[ -f "$PROGRESS_DB_PATH" ]]
+}
+
+update_run_counter() {
+  log "Incrementing run counter." "INFO"
+  ((_run_count++))
+  set_progress_record "$DEMOBILIZATION_COUNTER" "$_run_count"
+  log_demobilization_state
+}
+
+initialize_progress_db() {
+  if is_progress_db_empty; then
+    log "Creating demobilize db and first run entry" "INFO"
+    set_progress_record "$DEMOBILIZATION_COUNTER" 0
+  fi
+  log "demobilize db already exists, skipping creation" "DEBUG"
+}
+
+is_user_demobilized() {
+  NetAccList=$(dscl . list /Users OriginalNodeName | awk '{print $1}' 2>/dev/null)
+  if [[ -z "$NetAccList" ]]; then
+    log "User demobilization confirmed." "INFO"
+    return
+  fi
+  log "User did not demobilized successfully." "WARN"
+  false
+}
+
+cleanup() {
+  log "Removing demobilization launch daemon" "DEBUG"
+  /bin/rm -f $DEMOBILIZATION_DAEMON
+  /bin/rm -f $DEMOBILIZATION_LAUNCH_AGENT
+}
+
+show_depnotify_completion() {
+  # Nice completion text
+  log "Displaying DEPNotify completion text" "DEBUG"
+  {
+    echo "Command: DeterminateManual: 0"
+    echo "Status: $DEMOBILIZATION_COMPLETE_TEXT"
+    echo "Command: MainText: $DEMOBILIZATION_COMPLETE_MAIN_TEXT"
+    echo "Command: ContinueButton: $DEMOBILIZATION_COMPLETE_BUTTON_TEXT"
+  } >>"$DEPNOTIFY_LOG"
+}
+
+show_depnotify_error() {
+  log "Hit DEPNotify error state" "ERROR"
+  local last_status_msg
+  last_status_msg="$($DEFAULTS_BINARY read $PROGRESS_DB_PATH "$DEMOBILIZATION_STATUS_UPDATE_MSG" 2>/dev/null)"
+  local error_main_text
+  error_main_text="$ERROR_MAIN_TEXT"' \\n Failed to '"$last_status_msg"' \\n '"$ERROR_SUFFIX_TEXT"
+  {
+    echo "Command: DeterminateManual: 0"
+    echo "Command: MainTitle: $ERROR_BANNER_TITLE"
+    echo "Command: MainText: $error_main_text"
+    echo "Status: $ERROR_STATUS "
+    echo "Command: ContinueButton: Quit"
+  } >>"$DEPNOTIFY_LOG"
+  exit 1
+}
+
+log_authdb_state() {
+  while IFS=$'\n' read -r line; do
+    log "authdb state: $line" "DEBUG"
+  done < <("$AUTHCHANGER_BINARY" -print)
+}
+
+disable_jamf_connect() {
+  log "Disabling Jamf Connect." "INFO"
+  log_authdb_state
+  $AUTHCHANGER_BINARY -reset >&2
+}
+
+enable_jamf_connect_demobilization() {
+  local msg="$1"
+  update_depnotify_status "$msg" true
+  log "Enable demobilization on next login." "INFO"
+  $AUTHCHANGER_BINARY -reset -JamfConnect >&2
+  log_authdb_state
+}
+
+disable_jamf_connect_on_next_login() {
+  local msg="$1"
+  update_depnotify_status "$msg" true
+  log "Disabling Jamf Connect on next login." "INFO"
+  /bin/rm -f /tmp/.jclrun
+}
+
+is_ready_to_complete() {
+  if is_user_demobilized; then
+    log "Ready to complete" "INFO"
+    return
+  fi
+  log "Not ready to complete." "ERROR"
+  false
+}
+
+log_demobilization_state() {
+  while IFS=$'\n' read -r record; do
+    log "Current demobilize state: $record" "DEBUG"
+  done < <(get_progress_record "ALL" | awk '/=/{ sub(/^[ \t]+/, ""); print }')
+}
+
+# global flags start with _
+get_global_demobilization_flags() {
+  _first_demobilization_run="$(get_progress_record "first_demobilization_run")"
+  _demobilization="$(get_progress_record "jc_demobilized")"
+  _run_count="$(get_progress_record "$DEMOBILIZATION_COUNTER")"
+}
+
+set_start_messages() {
+  if [[ "$_run_count" -eq 1 ]]; then
+    _start_main_text="$INITIAL_START_MAIN_TEXT"
+    _start_status="$INITIAL_START_STATUS"
+  else
+    _start_main_text="$ALTERNATE_START_MAIN_TEXT"
+    _start_status="$ALTERNATE_START_STATUS"
+  fi
+}
+
+set_demobilization_to_done() {
+  set_progress_record "jc_demobilized" "done"
+}
+
+trigger_munki() {
+  /usr/local/munki/managedsoftwareupdate --auto
+}
+
+switch_identity_framework() {
+  local msg="$1"
+  update_depnotify_status "$msg" true
+  uninstall_nomad
+}
+
+uninstall_nomad() {
+  sudo launchctl bootout gui/"${CURRENT_USER_ID}" /Library/LaunchAgents/com.trusourcelabs.NoMAD.plist
+  /bin/rm /Library/LaunchAgents/com.trusourcelabs.NoMAD.plist
+  /bin/rm -rf /Applications/NoMAD.app
+  /bin/rm -rf /Library/Security/SecurityAgentPlugins/NoMADLoginAD.bundle
+  /usr/sbin/pkgutil --forget com.trusourcelabs.NoMAD
+  /usr/sbin/pkgutil --forget menu.nomad.login.ad
+  /usr/sbin/pkgutil --forget com.trusourcelabs.nomad.plist.payload.pkg
+}
+
+prep_demobilization_run() {
+  # Start
+  /usr/bin/touch "$DEMOBILIZATION_START_FLAG"
+  /bin/rm -f "$DEMOBILIZATION_RUN_FLAG"
+  log_demobilization_state
+  initialize_progress_db
+  get_global_demobilization_flags
+  update_run_counter
+  set_start_messages
+  # Start depnotify only on first run
+  [[ "$_run_count" == "1" ]] && start_depnotify
+}
+
+start_depnotify() {
+  reset_depnotify
+  wait_for_desktop
+  get_current_user_info
+  set_depnotify_preferences
+  set_depnotify_start_window
+  start_depnotify_process
+  wait_for_depnotify_process
+  caffeinate_depnotify_process
+  update_depnotify_status "$_start_status"
+}
+
+do_first_demobilization_run() {
+  echo "Command: DeterminateManual: 6" >>"$DEPNOTIFY_LOG"
+  switch_identity_framework "Switching identity management framework"
+  wait_for_pkg "$JAMFCONNECT_PKG_ID" "Installing identity management software"
+  submit_system_inventory
+  wait_for_profile ".*Computer Level.*Cert" \
+    "Migrating authentication certificate"
+  wait_for_profile "OTA - Jamf Connect Login" "Waiting for login configuration"
+  wait_for_profile "Jamf Connect Login Demobilize" "Waiting for new account configuration"
+  disable_jamf_connect_on_next_login "Configuring next logon"
+  enable_jamf_connect_demobilization "Enabling account conversion on next logon"
+  set_progress_record "first_demobilization_run" "done"
+  prompt_for_logout "Almost done."
+}
+
+complete_demobilization() {
+  log "Finalizing demobilization" "INFO"
+  log_demobilization_state
+  if is_ready_to_complete; then
+    disable_jamf_connect
+    set_demobilization_to_done
+    submit_system_inventory
+    log_demobilization_state
+    log_authdb_state
+    log "Demobilization complete!" "INFO"
+    cleanup
+  else
+    log_demobilization_state
+    log_authdb_state
+  fi
+}
+
+#########################################################################################
+#########################################################################################
+# Core Script Logic
+#########################################################################################
+#########################################################################################
+prep_demobilization_run
+if [[ "$_run_count" -gt 4 ]]; then
+  # Show error window if we've exceeded run attempts
+  log "Ran too many times." "ERROR"
+  show_depnotify_error
+fi
+
+if [[ "$_demobilization" == "done" ]]; then
+  # Not sure why we are running
+  log "Demobilization marked as 'done' but still running DEPNotify, why?" "WARN"
+  complete_demobilization
+fi
+
+if [[ "$_first_demobilization_run" != "done" ]]; then
+  do_first_demobilization_run
+else
+  complete_demobilization
+fi
