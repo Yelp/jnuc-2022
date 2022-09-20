@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "oktaidlib"
+version = "0.1.0"
+description = "Small python library to fetch user attribubtes from Okta"
+authors = ["Carlos Hernandez <chernand@yelp.com>"]
+license = "MIT"
+readme = "README.md"
+include = [
+  "LICESNE",
+]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.28.1"
+PyYAML = "^6.0"
+
+
+[tool.poetry.group.dev.dependencies]
+black = "^22.8.0"
+flake8 = "^5.0.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
