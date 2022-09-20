@@ -2,10 +2,11 @@
 
 ## Intro
 
-The scripts in this repo are provided as-is and will require adaptation to work in your environment.
+The scripts in this repo are provided as-is and will require adaptation to work
+in your environment.
 
-Please use this as general inspiration when designing the demobilization process for your users!
-
+Please use this as general inspiration when designing the demobilization process
+for your users!
 
 ## Building
 
