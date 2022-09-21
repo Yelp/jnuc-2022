@@ -1,12 +1,12 @@
-# account_demobilization_tool
+# Account demobilization tool
 
 ## Intro
 
-The scripts in this repo are as-is and will require adaptation to work in your
+The scripts in this repository will require adaptation to work in your
 environment.
 
-Please use this as general inspiration when designing the demobilization process
-for your users!
+Please use this as general inspiration when designing your own demobilization
+process!
 
 ## Building
 
